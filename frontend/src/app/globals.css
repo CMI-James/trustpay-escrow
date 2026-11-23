@@ -174,25 +174,28 @@ button {
   border-color: rgba(59, 130, 246, 0.5);
 }
 
-/* Floating menu / popover fade-in */
-@keyframes menu-fade-in {
-  from {
-    opacity: 0;
-    transform: translateY(-4px) scale(0.97);
+/* Notification bell badge pop-in: scale 0.8 -> 1.1 -> 1.0 (#197) */
+@keyframes badge-pop {
+  0% {
+    transform: scale(0.8);
+    opacity: 0.6;
   }
-  to {
+  60% {
+    transform: scale(1.1);
     opacity: 1;
-    transform: translateY(0) scale(1);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
   }
 }
 
-.animate-menu-fade-in {
-  animation: menu-fade-in 140ms ease-out both;
-  transform-origin: top right;
+.animate-badge-pop {
+  animation: badge-pop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .animate-menu-fade-in {
+  .animate-badge-pop {
     animation: none;
   }
 }

@@ -25,6 +25,7 @@ import {
   ProposalCounterOfferModal,
 } from '@/components/ProposalCounterOfferModal';
 import type { CounterOffer } from '@/lib/counter-offer';
+import { TaxExportModal } from '@/components/TaxExportModal';
 
 export function FreelancerDashboard() {
   const router = useRouter();
@@ -36,6 +37,7 @@ export function FreelancerDashboard() {
     walletAddress: address,
   });
   const [loading, setLoading] = useState(true);
+  const [showTaxExport, setShowTaxExport] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [lightboxImage, setLightboxImage] = useState<{ url: string; name?: string } | null>(null);
@@ -541,6 +543,14 @@ export function FreelancerDashboard() {
             </span>
           </div>
 
+          <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowTaxExport(true)}
+            className="px-3 py-2 rounded-xl text-xs font-semibold bg-[#18181b] border border-[#27272a] text-[#e4e4e7] hover:bg-[#27272a] transition-all"
+            title="Export annual crypto income summary (CSV / PDF)"
+          >
+            🧾 Tax Export
+          </button>
           <div className="flex items-center space-x-1 bg-[#18181b] p-1 rounded-xl border border-[#27272a]">
             <button
               onClick={() => setActiveTab('explore')}
@@ -562,6 +572,7 @@ export function FreelancerDashboard() {
             >
               My Proposals (<NumberRoll value={proposals.length} />)
             </button>
+          </div>
           </div>
         </div>
 
@@ -1259,18 +1270,11 @@ export function FreelancerDashboard() {
         recipientRoleLabel={chatModalState.recipientRoleLabel}
       />
 
-      {/* Dispute confirmation */}
-      <ConfirmModal
-        isOpen={disputeTarget !== null}
-        onClose={() => setDisputeTarget(null)}
-        onConfirm={handleConfirmDispute}
-        level="danger"
-        title="Raise a dispute?"
-        impactSummary="This freezes all escrowed funds until an arbiter issues a ruling."
-        description={`Disputing “${disputeTarget?.title ?? ''}” locks the on-chain escrow. Only raise a dispute after trying to resolve the issue with the other party.`}
-        confirmText="DISPUTE"
-        confirmLabel="Raise dispute"
-        cancelLabel="Keep project"
+      {/* Annual tax / 1099 crypto income export (#161) */}
+      <TaxExportModal
+        isOpen={showTaxExport}
+        onClose={() => setShowTaxExport(false)}
+        freelancerAddress={address}
       />
 
       {/* Rich Milestone Deliverable Submission Modal */}
