@@ -7,7 +7,7 @@ import { useWalletStore } from "@/store/walletStore";
 import { CryptoId } from "@/components/ui/CryptoId";
 import { useRouter } from "next/navigation";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
-import { authenticateWithSep10, signChallengeWithFreighter } from "@/lib/sep10-auth";
+import { useWalletEventListener } from "@/hooks/useWalletEventListener";
 
 const getErrorMessage = (err: any, prefix = ""): string => {
   let msg = "An unknown error occurred";
@@ -39,6 +39,8 @@ interface WalletOption {
 
 export default function WalletConnect() {
   const { address, activeRole, walletName, setWalletInfo, disconnect } = useWalletStore();
+  // Initialize wallet event listeners for account/network changes
+  useWalletEventListener();
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectingWallet, setConnectingWallet] = useState<WalletType | null>(null);
   const [showEmailModal, setShowEmailModal] = useState(false);
