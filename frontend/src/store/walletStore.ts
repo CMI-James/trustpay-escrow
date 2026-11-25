@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
+import { SupportedWalletId } from '@/lib/wallet-adapters';
+import { clearPersistedDashboardState } from '@/hooks/usePersistentTab';
 
 // Safe storage resolver that handles browser localStorage and falls back gracefully in tests/SSR
 const getStorageProvider = () => {
@@ -58,8 +60,7 @@ export interface PendingMultisigRequest {
 export interface WalletState {
   address: string | null;
   walletName: string | null;
-  network: string | null;
-  targetNetwork: string;
+  walletType: SupportedWalletId | null;
   activeRole: ActiveRole;
   isClient: boolean;
   isFreelancer: boolean;
@@ -70,8 +71,8 @@ export interface WalletState {
   activeOrgAccountId: string | null;
   roleFilterStates: Record<ActiveRole, RoleFilterState>;
   pendingMultisig: PendingMultisigRequest[];
-  setActiveRole: (role: ActiveRole) => void;
   setIsConnecting: (isConnecting: boolean) => void;
+  setActiveRole: (role: ActiveRole) => void;
   /** Replaces the in-memory SEP-0010 JWT (e.g. after a silent refresh). */
   setToken: (token: string | null) => void;
   setRoleFilter: (role: ActiveRole, filters: Partial<RoleFilterState>) => void;
@@ -81,7 +82,7 @@ export interface WalletState {
     isFreelancer?: boolean,
     walletName?: string,
     token?: string | null,
-    network?: string | null
+    walletType?: SupportedWalletId | null
   ) => void;
   addOrgAccount: (account: { label: string; address: string; walletName?: string }) => void;
   removeOrgAccount: (id: string) => void;
@@ -101,8 +102,7 @@ export const useWalletStore = create<WalletState>()(
     (set, get) => ({
       address: null,
       walletName: null,
-      network: null,
-      targetNetwork: process.env.NEXT_PUBLIC_STELLAR_NETWORK || 'TESTNET',
+      walletType: null,
       activeRole: 'client',
       isClient: true,
       isFreelancer: true,
@@ -117,8 +117,8 @@ export const useWalletStore = create<WalletState>()(
         arbiter: { status: 'disputed', search: '', category: 'All' },
       },
       pendingMultisig: [],
-      setActiveRole: (activeRole) => set({ activeRole }),
       setIsConnecting: (isConnecting) => set({ isConnecting }),
+      setActiveRole: (activeRole) => set({ activeRole }),
       setToken: (token) => set({ token }),
       setRoleFilter: (role, filters) =>
         set((state) => ({
@@ -133,9 +133,9 @@ export const useWalletStore = create<WalletState>()(
         isFreelancer = true,
         walletName = 'Freighter',
         token = null,
-        network = null
+        walletType = 'freighter'
       ) =>
-        set({ address, isClient, isFreelancer, walletName, token, network, isConnecting: false }),
+        set({ address, isClient, isFreelancer, walletName, token, walletType, isConnecting: false }),
       addOrgAccount: ({ label, address, walletName }) =>
         set((state) => {
           const trimmedLabel = label.trim() || 'Organization wallet';
@@ -188,10 +188,14 @@ export const useWalletStore = create<WalletState>()(
         } catch {
           // ignore network error on logout
         }
+        // Drop persisted tab/filter context so the next wallet starts clean (#177)
+        try {
+          clearPersistedDashboardState();
+        } catch {}
         set({
           address: null,
           walletName: null,
-          network: null,
+          walletType: null,
           activeRole: 'client',
           isClient: true,
           isFreelancer: true,

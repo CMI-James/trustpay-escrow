@@ -6,6 +6,7 @@ import { ThemeProvider } from 'next-themes';
 import { MobileBottomNav } from '@/components/MobileBottomNav';
 import { NetworkMismatchBanner } from '@/components/NetworkMismatchBanner';
 import { CommandPalette } from '@/components/CommandPalette';
+import { PerformanceTelemetryButton } from '@/components/PerformanceTelemetryModal';
 
 const geistSans = Geist({
   variable: '--font-geist-sans',
@@ -104,6 +105,7 @@ export default function RootLayout({
           <MobileBottomNav />
           <Toaster />
           <CommandPalette />
+          <PerformanceTelemetryButton />
         </ThemeProvider>
       </body>
     </html>
