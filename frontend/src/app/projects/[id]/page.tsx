@@ -47,7 +47,7 @@ import {
   RequestRevisionModal,
   type RevisionRequestPayload,
 } from '@/components/RequestRevisionModal';
-import { TransactionSpeedUpModal } from '@/components/TransactionSpeedUpModal';
+import { ProjectReviewModal } from '@/components/ProjectReviewModal';
 
 export default function ProjectDetailsPage() {
   const params = useParams();
@@ -90,14 +90,12 @@ export default function ProjectDetailsPage() {
   const [resolveClientAmount, setResolveClientAmount] = useState<number | ''>('');
   const [resolveFreelancerAmount, setResolveFreelancerAmount] = useState<number | ''>('');
 
-  // Transaction speed-up modal state (#313)
-  const [stalledTransaction, setStalledTransaction] = useState<{
-    id: string;
-    innerTxXdr: string;
-    description: string;
-    submittedAt: string;
-    projectId?: string;
-    milestoneIndex?: number;
+  // Review modal state (#312)
+  const [showReviewModal, setShowReviewModal] = useState(false);
+  const [reviewContext, setReviewContext] = useState<{
+    revieweeAddress: string;
+    revieweeRole: 'client' | 'freelancer';
+    reviewerRole: 'client' | 'freelancer';
   } | null>(null);
 
   const [showFundEscrowModal, setShowFundEscrowModal] = useState(false);
@@ -206,6 +204,52 @@ export default function ProjectDetailsPage() {
     if (!projectId) return;
     fetchProject();
   }, [projectId]);
+
+  // Prompt for review when project is completed (#312)
+  useEffect(() => {
+    if (!project || project.status !== 'completed' || !address) return;
+    
+    const isClientUser = Boolean(
+      address && (
+        (project.client_address && address.toUpperCase() === project.client_address.toUpperCase()) ||
+        activeRole === 'client'
+      )
+    );
+    const isFreelancerUser = Boolean(
+      address && (
+        (project.freelancer_address && address.toUpperCase() === project.freelancer_address.toUpperCase()) ||
+        activeRole === 'freelancer'
+      )
+    );
+
+    // Check if user has already reviewed (would need API call in real implementation)
+    // For now, show prompt if user is a participant and project is completed
+    if (isClientUser || isFreelancerUser) {
+      const reviewedKey = `reviewed-${projectId}-${address}`;
+      const hasReviewed = window.localStorage.getItem(reviewedKey);
+      
+      if (!hasReviewed) {
+        // Small delay to let UI settle
+        const timer = setTimeout(() => {
+          if (isClientUser) {
+            setReviewContext({
+              revieweeAddress: project.freelancer_address || '',
+              revieweeRole: 'freelancer',
+              reviewerRole: 'client',
+            });
+          } else if (isFreelancerUser) {
+            setReviewContext({
+              revieweeAddress: project.client_address || '',
+              revieweeRole: 'client',
+              reviewerRole: 'freelancer',
+            });
+          }
+          setShowReviewModal(true);
+        }, 1500);
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [project, address, activeRole, projectId]);
 
   if (loading) {
     return <ProjectDetailSkeleton />;
@@ -1740,13 +1784,26 @@ export default function ProjectDetailsPage() {
         onUpdated={fetchProject}
       />
 
-      {/* Transaction Speed-Up Modal (#313) */}
-      <TransactionSpeedUpModal
-        stalledTx={stalledTransaction}
-        onClose={() => setStalledTransaction(null)}
-        onSuccess={(newTxHash) => {
-          toast.success(`Fee-bump confirmed: ${newTxHash.slice(0, 16)}...`);
-          setStalledTransaction(null);
+      {/* Project Review Modal (#312) */}
+      <ProjectReviewModal
+        isOpen={showReviewModal}
+        onClose={() => { setShowReviewModal(false); setReviewContext(null); }}
+        projectId={projectId}
+        projectTitle={project?.title || ''}
+        revieweeAddress={reviewContext?.revieweeAddress || ''}
+        revieweeRole={reviewContext?.revieweeRole || 'freelancer'}
+        reviewerRole={reviewContext?.reviewerRole || 'client'}
+        onSubmit={async (review) => {
+          // In a real implementation, this would call the API
+          const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+          await fetch(`${apiUrl}/api/projects/${projectId}/reviews`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(review),
+          });
+          setShowReviewModal(false);
+          setReviewContext(null);
+          toast.success('Review submitted successfully!');
           void fetchProject();
         }}
       />
