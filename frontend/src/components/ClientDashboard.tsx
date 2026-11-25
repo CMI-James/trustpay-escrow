@@ -13,32 +13,10 @@ import { ImageLightboxModal } from './ImageLightboxModal';
 import { ApplicantCard, type ApplicantCardData } from './ApplicantCard';
 import { FreelancerProfileModal } from './FreelancerProfileModal';
 import { ProjectChatModal } from './ProjectChatModal';
-import { DaoProposalGeneratorModal } from './DaoProposalGeneratorModal';
+import { MilestoneBuilderCanvas } from './MilestoneBuilderCanvas';
 import { ProjectCardSkeletonList } from '@/components/skeletons';
 import { SUPPORTED_TOKENS } from '@/config/tokens';
-import { useTokenBalance, useTokenBalances, getBalanceShortfall } from '@/hooks/useCreateProjectForm';
-import { TokenSelector } from '@/components/TokenSelector';
-import { CurrencyAmountInput } from '@/components/CurrencyAmountInput';
-import { usePersistentTab } from '@/hooks/usePersistentTab';
-import { BalanceWarningBadge } from '@/components/BalanceWarningBadge';
-import { LiquidityDepthOptimizer } from '@/components/LiquidityDepthOptimizer';
-import { TokenPriceAlertWidget } from '@/components/TokenPriceAlertWidget';
-import { StarredFreelancersList } from '@/components/StarredFreelancersList';
-import { NotificationScheduleModal } from '@/components/NotificationScheduleModal';
-import { ProposalCounterOfferModal } from '@/components/ProposalCounterOfferModal';
-import { useStarredFreelancers } from '@/hooks/useStarredFreelancers';
-import type { CounterOffer } from '@/lib/counter-offer';
-import { showSorobanErrorToast } from '@/components/SorobanErrorToast';
-import { ProjectAuditLog } from '@/components/ProjectAuditLog';
-import { CalendarExportButton } from '@/components/CalendarExportButton';
-import { DownloadReceiptButton } from '@/components/DownloadReceiptButton';
-import { AccountsPayableExportModal } from '@/components/AccountsPayableExportModal';
-import { BulkMilestonePayoutManager } from '@/components/BulkMilestonePayoutManager';
-import { MilestoneCertificateButton } from '@/components/MilestoneCertificateButton';
-import { GasFeeEstimatorWidget } from '@/components/GasFeeEstimatorWidget';
-import { BlendYieldVisualizer } from '@/components/BlendYieldVisualizer';
-import { BLEND_ALLOCATION_RATIO } from '@/lib/blend-yield';
-import { ShareMilestoneButton } from '@/components/ShareableMilestoneCard';
+import { useOfflineSync, OfflineStatusPill } from '@/hooks/useOfflineSync';
 import {
   createProjectOnChain,
   lockEscrowOnChain,
@@ -224,100 +202,74 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
   const [showApExportModal, setShowApExportModal] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Proposal counter-offer negotiation (#150)
-  const [counterOfferTarget, setCounterOfferTarget] = useState<ApplicantCardData | null>(null);
-  const [counterOfferSubmitting, setCounterOfferSubmitting] = useState(false);
+  const { isOnline, persistDraft, loadDraft, removeDraft, queueSubmission } = useOfflineSync({
+    draftKey: 'client-dashboard-project-draft',
+    draftType: 'project',
+  });
 
-  // Destructive project actions (cancel / dispute) confirmed through ConfirmModal
-  const [confirmAction, setConfirmAction] = useState<{
-    type: 'cancel' | 'dispute';
-    project: Project;
-  } | null>(null);
-
-  const getCancelBlockReason = (proj: Project): string | undefined => {
-    if (proj.status === 'completed') return 'Completed projects cannot be cancelled';
-    if (proj.status === 'disputed') return 'Resolve the open dispute first';
-    if (proj.freelancer_address) {
-      return 'A freelancer is assigned — use mutual cancellation instead';
-    }
-    return undefined;
-  };
-
-  const getDisputeBlockReason = (proj: Project): string | undefined => {
-    if (proj.project_id_onchain === undefined || proj.project_id_onchain === null) {
-      return 'No on-chain escrow to dispute yet';
-    }
-    if (proj.status === 'disputed') return 'A dispute is already open';
-    if (proj.status === 'completed') return 'Completed projects cannot be disputed';
-    if (!canRaiseDispute(proj, address)) return 'Only the client or freelancer can raise a dispute';
-    return undefined;
-  };
-
-  const handleConfirmProjectAction = async () => {
-    if (!confirmAction) return;
-    if (!address) {
-      toast.error('Please connect your wallet first.');
-      return;
-    }
-    const { type, project } = confirmAction;
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
-    const hasOnChainEscrow =
-      project.project_id_onchain !== undefined && project.project_id_onchain !== null;
-    try {
-      if (type === 'cancel') {
-        if (hasOnChainEscrow) {
-          await cancelUnassignedProjectOnChain({
-            clientAddress: address,
-            projectIdOnChain: project.project_id_onchain as number | string | bigint,
-          });
-        }
-        const res = await authFetch(`${apiUrl}/api/projects/${project.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: 'cancelled' }),
-        });
-        if (res.ok) {
-          toast.success('Project cancelled' + (hasOnChainEscrow ? ' and escrow funds refunded.' : '.'));
-        } else {
-          toast.warning('Escrow cancelled on-chain, but the project record could not be updated.');
-        }
-      } else {
-        await raiseDisputeOnChain({
-          callerAddress: address,
-          projectIdOnChain: project.project_id_onchain as number | string | bigint,
-        });
-        await authFetch(`${apiUrl}/api/projects/${project.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: 'disputed' }),
-        });
-        toast.warning('Dispute raised! Funds are frozen until an arbiter rules.');
-      }
-      setConfirmAction(null);
-      await fetchBackendProjects();
-    } catch (err: any) {
-      toast.error(`${type === 'cancel' ? 'Cancellation' : 'Dispute'} failed: ${err?.message || err}`);
-    }
-  };
-
-  // Detect whether the connected enterprise account requires multiple signers (#multisig)
+  // Restore draft from IndexedDB on initial mount
   useEffect(() => {
-    let cancelled = false;
-    if (!activeWalletAddress) {
-      setIsMultisig(false);
-      return;
+    let isMounted = true;
+    async function restoreLocalDraft() {
+      const saved = await loadDraft<any>('client-dashboard-project-draft');
+      if (saved && isMounted && (saved.formTitle || saved.formBudget)) {
+        if (saved.formTitle) setFormTitle(saved.formTitle);
+        if (saved.formDescription) setFormDescription(saved.formDescription);
+        if (saved.formCategory) setFormCategory(saved.formCategory);
+        if (saved.customCategory) setCustomCategory(saved.customCategory);
+        if (saved.formProjectType) setFormProjectType(saved.formProjectType);
+        if (saved.formBudget) setFormBudget(saved.formBudget);
+        if (saved.formToken) setFormToken(saved.formToken);
+        if (saved.formDeadline) setFormDeadline(saved.formDeadline);
+        if (saved.formVisibility) setFormVisibility(saved.formVisibility);
+        if (saved.formYieldEnabled !== undefined) setFormYieldEnabled(saved.formYieldEnabled);
+        if (saved.formFreelancerAddress) setFormFreelancerAddress(saved.formFreelancerAddress);
+        if (saved.formMilestones && saved.formMilestones.length > 0) setFormMilestones(saved.formMilestones);
+        toast.info('Restored project draft from local IndexedDB storage');
+      }
     }
-    fetchMultisigAccountInfo(activeWalletAddress)
-      .then((info) => {
-        if (!cancelled) setIsMultisig(isMultisigAccount(info));
-      })
-      .catch(() => {
-        if (!cancelled) setIsMultisig(false);
-      });
+    restoreLocalDraft();
     return () => {
-      cancelled = true;
+      isMounted = false;
     };
-  }, [activeWalletAddress]);
+  }, [loadDraft]);
+
+  // Auto-save draft every 5 seconds to IndexedDB
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (formTitle || formDescription || (formBudget !== '' && Number(formBudget) > 0)) {
+        persistDraft({
+          formTitle,
+          formDescription,
+          formCategory,
+          customCategory,
+          formProjectType,
+          formBudget,
+          formToken,
+          formDeadline,
+          formVisibility,
+          formYieldEnabled,
+          formFreelancerAddress,
+          formMilestones,
+        });
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [
+    formTitle,
+    formDescription,
+    formCategory,
+    customCategory,
+    formProjectType,
+    formBudget,
+    formToken,
+    formDeadline,
+    formVisibility,
+    formYieldEnabled,
+    formFreelancerAddress,
+    formMilestones,
+    persistDraft,
+  ]);
 
   // Function to fetch real projects from backend
   const fetchBackendProjects = async (pageToFetch = currentPage) => {
@@ -751,11 +703,16 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
       return;
     }
 
-    if (hasInsufficientBalance) {
-      toast.error(
-        `Insufficient ${formToken} balance. Fund your wallet with at least ${balanceShortfall.toLocaleString()} more ${formToken} before creating this escrow.`
-      );
-      return;
+    if (formMilestones.length > 0 && formBudget && Number(formBudget) > 0) {
+      const msSum = formMilestones.reduce((acc, m) => acc + (Number(m.amount) || 0), 0);
+      const budgetNum = Number(formBudget);
+      const diff = Math.abs(msSum - budgetNum);
+      if (diff > 0.05 * budgetNum && diff > 1) {
+        toast.error(
+          `Cannot submit: Milestone allocations (${msSum.toFixed(2)} ${formToken}) must equal 100% of project budget (${budgetNum} ${formToken}). Please auto-balance.`
+        );
+        return;
+      }
     }
 
     setIsSubmitting(true);
@@ -821,6 +778,27 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
         estimated_yield: Number(calculateEstimatedYield()),
       };
 
+      if (!isOnline) {
+        await queueSubmission({
+          url: `${apiUrl}/api/projects`,
+          method: 'POST',
+          body,
+          description: `Create project: ${formTitle}`,
+        });
+        await removeDraft('client-dashboard-project-draft');
+        toast.warning(
+          'Offline: Project creation queued locally. Will automatically sync to server when connection returns!',
+          { duration: 6000 }
+        );
+        setFormTitle('');
+        setFormDescription('');
+        setFormBudget('');
+        setFormMilestones([]);
+        setIsSubmitting(false);
+        setActiveTab('projects');
+        return;
+      }
+
       const res = await authFetch(`${apiUrl}/api/projects`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -848,6 +826,7 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
       }
 
       toast.success('Project saved successfully!');
+      await removeDraft('client-dashboard-project-draft');
       setFormTitle('');
       setFormDescription('');
       setFormBudget('');
@@ -898,6 +877,7 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
               {activeTab === 'applicants' && 'applicants'}
               {activeTab === 'saved' && 'saved contractors'}
             </span>
+            <OfflineStatusPill className="ml-2" />
           </div>
 
           <div className="flex items-center space-x-1 bg-[#18181b] p-1 rounded-xl border border-[#27272a]">
@@ -1193,6 +1173,11 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                       {proj.project_id_onchain !== undefined && proj.project_id_onchain !== null && (
                         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-indigo-500/10 text-indigo-400 border border-indigo-500/30">
                           <span>✦</span> Soroban Escrow #{proj.project_id_onchain.toString()}
+                        </span>
+                      )}
+                      {proj.milestones?.some((m) => m.status === 'submitted') && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30 animate-pulse">
+                          <span>⏳</span> Timelock Active
                         </span>
                       )}
                       {(proj.status === 'in_progress' || (proj.status as string) === 'In progress') && (
@@ -1780,88 +1765,14 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                 )}
               </div>
 
-              {/* Milestones Builder Section */}
+              {/* Milestones Builder Canvas Section */}
               <div className="pt-4 border-t border-[#27272a] space-y-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm sm:text-base font-bold text-white">
-                    Milestones ({formMilestones.length})
-                  </h3>
-                  <button
-                    type="button"
-                    onClick={() => setShowAddMilestoneModal(true)}
-                    className="inline-flex items-center space-x-1 px-3 py-1.5 bg-transparent hover:bg-[#27272a] text-white font-semibold text-xs rounded-lg border border-[#3f3f46] transition-all"
-                  >
-                    <span>+ Add milestone</span>
-                  </button>
-                </div>
-
-                <div className="space-y-2.5">
-                  {formMilestones.length === 0 ? (
-                    <div className="text-center py-6 bg-[#1c1c20]/50 border border-dashed border-[#333338] rounded-xl">
-                      <p className="text-xs text-[#a1a1aa]">
-                        No milestones added yet. Click &quot;+ Add milestone&quot; to define project
-                        milestones.
-                      </p>
-                    </div>
-                  ) : (
-                    formMilestones.map((m, idx) => (
-                      <div
-                        key={m.id}
-                        className="bg-[#1c1c20] border border-[#27272a] rounded-xl p-4 space-y-2 group transition-all"
-                      >
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center space-x-2">
-                            <span className="text-xs font-bold text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">
-                              #{idx + 1}
-                            </span>
-                            <span className="text-sm font-bold text-white">{m.title}</span>
-                          </div>
-                          <div className="flex items-center space-x-3">
-                            <span className="text-sm font-extrabold text-[#22c55e]">
-                              {m.amount} {selectedProjectForApplicants?.token || 'USDC'}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => handleRemoveMilestone(m.id)}
-                              className="text-[#71717a] hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-1"
-                              title="Remove milestone"
-                            >
-                              <svg
-                                className="w-4 h-4"
-                                fill="none"
-                                stroke="currentColor"
-                                viewBox="0 0 24 24"
-                              >
-                                <path
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                  strokeWidth="2"
-                                  d="M6 18L18 6M6 6l12 12"
-                                />
-                              </svg>
-                            </button>
-                          </div>
-                        </div>
-
-                        {m.description && (
-                          <p className="text-xs text-[#a1a1aa] line-clamp-2">{m.description}</p>
-                        )}
-
-                        <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] text-[#71717a]">
-                          {m.deliverable_type && (
-                            <span className="bg-[#232326] px-2 py-0.5 rounded border border-[#333338] text-[#e4e4e7]">
-                              📦 {m.deliverable_type}
-                            </span>
-                          )}
-                          <span>• Revisions: {m.revision_limit ?? 0}</span>
-                          {m.due_date && (
-                            <span>• Due: {new Date(m.due_date).toLocaleDateString()}</span>
-                          )}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
+                <MilestoneBuilderCanvas
+                  milestones={formMilestones as any}
+                  totalBudget={Number(formBudget) || 0}
+                  currency={formToken}
+                  onChange={(updated) => setFormMilestones(updated as any)}
+                />
               </div>
 
               {/* Network Gas & Soroban Fee Estimator */}

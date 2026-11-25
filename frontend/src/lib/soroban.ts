@@ -13,6 +13,8 @@ import {
   StrKey,
 } from '@stellar/stellar-sdk';
 import { signTransaction, isConnected } from '@stellar/freighter-api';
+import { signWithWallet, SupportedWalletId, getWalletAdapter } from '@/lib/wallet-adapters';
+import { useWalletStore } from '@/store/walletStore';
 import { SUPPORTED_TOKENS } from '@/config/tokens';
 import { parseFeeStats, type HorizonFeeStats, type NetworkFees } from '@/lib/fee-estimator';
 
@@ -205,6 +207,7 @@ export async function invokeSorobanMethod(options: {
   contractAddress?: string;
   functionName: string;
   args: xdr.ScVal[];
+  walletType?: SupportedWalletId;
   onStatusUpdate?: TxStatusCallback;
   /** Inclusion (base) fee in stroops. Defaults to the fee chosen in the gas estimator (#256). */
   baseFee?: number | string;
@@ -212,12 +215,22 @@ export async function invokeSorobanMethod(options: {
   const { callerAddress, functionName, args, onStatusUpdate } = options;
   const inclusionFee = String(options.baseFee ?? getSorobanBaseFee() ?? DEFAULT_SOROBAN_BASE_FEE);
   const targetContract = options.contractAddress || DEFAULT_ESCROW_CONTRACT_ID;
+  const activeWalletType: SupportedWalletId =
+    options.walletType || useWalletStore.getState().walletType || 'freighter';
+  const adapter = getWalletAdapter(activeWalletType);
 
-  onStatusUpdate?.('preparing', 'Validating wallet connection and account status...');
+  onStatusUpdate?.('preparing', `Validating ${adapter.name} connection and account status...`);
 
-  // 1. Verify Freighter is installed and ready
-  if (!(await isConnected())) {
-    throw new Error('Freighter wallet extension is not detected. Please install and unlock Freighter.');
+  // 1. Verify wallet is ready
+  if (activeWalletType === 'freighter') {
+    if (!(await isConnected())) {
+      throw new Error('Freighter wallet extension is not detected. Please install and unlock Freighter.');
+    }
+  } else if (activeWalletType !== 'albedo' && activeWalletType !== 'lobstr' && activeWalletType !== 'manual') {
+    const installed = await adapter.isInstalled();
+    if (!installed) {
+      throw new Error(`${adapter.name} extension is not detected. Please install or select another wallet.`);
+    }
   }
 
   // 2. Ensure account exists on ledger
@@ -252,26 +265,16 @@ export async function invokeSorobanMethod(options: {
     throw new Error(`Contract simulation failed for '${functionName}': ${errorMsg}`);
   }
 
-  onStatusUpdate?.('signing', 'Awaiting authorization signature in Freighter wallet...');
+  onStatusUpdate?.('signing', `Awaiting authorization signature in ${adapter.name}...`);
 
-  // 5. Sign prepared transaction XDR with Freighter
-  let signResult: any;
+  // 5. Sign prepared transaction XDR with multi-wallet adapter
+  let signedXdr = '';
   try {
-    signResult = await signTransaction(preparedTx.toXDR(), {
+    signedXdr = await signWithWallet(activeWalletType, preparedTx.toXDR(), {
       networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
     });
   } catch (signErr: any) {
     throw new Error(`Wallet signing cancelled or rejected: ${signErr.message || signErr}`);
-  }
-
-  let signedXdr = '';
-  if (typeof signResult === 'string') {
-    signedXdr = signResult;
-  } else if (signResult && typeof signResult === 'object') {
-    if (signResult.error) {
-      throw new Error(typeof signResult.error === 'string' ? signResult.error : (signResult.error.message || 'Freighter rejected signature'));
-    }
-    signedXdr = signResult.signedTxXdr || signResult.signedTransaction || '';
   }
 
   if (!signedXdr) {

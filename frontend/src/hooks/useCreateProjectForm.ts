@@ -10,6 +10,7 @@ import {
 import { z } from 'zod';
 import { useWalletStore } from '@/store/walletStore';
 import { useRouter } from 'next/navigation';
+import { useOfflineSync, OfflineStatusPill } from '@/hooks/useOfflineSync';
 
 import { SUPPORTED_TOKENS } from '@/config/tokens';
 import { HORIZON_URL } from '@/lib/soroban';
@@ -220,24 +221,33 @@ export function useCreateProjectForm() {
   const { address } = useWalletStore();
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState<Partial<Record<keyof ProjectFormData, string>>>({});
-  const [currentStep, setCurrentStep] = useState<number>(1);
-  const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
-  // Auto-funding after a fiat deposit: idle -> waiting (refresh requested) -> reloading -> submit/give up
-  const autoFundRef = useRef<'idle' | 'waiting' | 'reloading'>('idle');
+  
+  const {
+    isOnline,
+    persistDraft,
+    loadDraft,
+    removeDraft,
+    queueSubmission,
+  } = useOfflineSync({
+    draftKey: 'create-project-draft',
+    draftType: 'project',
+    autoSyncOnOnline: true,
+  });
 
-  const [formData, setFormData] = useState<ProjectFormData>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const saved = localStorage.getItem(DRAFT_STORAGE_KEY);
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          return { ...defaultInitialData, ...parsed, client_address: address || parsed.client_address || '' };
-        }
-      } catch (e) {
-        console.warn('Failed to parse draft from localStorage', e);
-      }
-    }
-    return { ...defaultInitialData, client_address: address || '' };
+  const [formData, setFormData] = useState<ProjectFormData>({
+    title: '',
+    description: '',
+    category: 'Development',
+    custom_category: '',
+    budget: 0,
+    token: 'USDC',
+    token_address: SUPPORTED_TOKENS.USDC.issuerOrContractAddress,
+    deadline: '',
+    visibility: 'Public',
+    attachments: [],
+    client_address: address || '',
+    yield_enabled: false,
+    estimated_yield: 0,
   });
 
   const walletBalance = useTokenBalance(address, formData.token);
@@ -246,7 +256,37 @@ export function useCreateProjectForm() {
   const balanceShortfall = getBalanceShortfall(walletBalance.balance, formData.budget);
   const hasSufficientBalance = isBalanceSufficient(walletBalance.balance, formData.budget);
 
-  // Address sync
+  // Restore draft from IndexedDB on initial mount
+  useEffect(() => {
+    let isMounted = true;
+    async function restoreDraft() {
+      const saved = await loadDraft<ProjectFormData>('create-project-draft');
+      if (saved && isMounted && (saved.title || saved.description || saved.budget > 0)) {
+        setFormData((prev) => ({
+          ...prev,
+          ...saved,
+          client_address: address || saved.client_address || '',
+        }));
+        toast.info('Restored saved project draft from local offline storage');
+      }
+    }
+    restoreDraft();
+    return () => {
+      isMounted = false;
+    };
+  }, [loadDraft, address]);
+
+  // Auto-save project creation drafts to IndexedDB every 5 seconds
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (formData.title || formData.description || formData.budget > 0) {
+        persistDraft(formData, 'create-project-draft');
+      }
+    }, 5000);
+
+    return () => clearInterval(timer);
+  }, [formData, persistDraft]);
+
   useEffect(() => {
     if (address && formData.client_address !== address) {
       setFormData((prev) => ({ ...prev, client_address: address }));
@@ -402,6 +442,30 @@ export function useCreateProjectForm() {
     }
 
     setLoading(true);
+
+    // If offline, queue request for automatic sync on reconnect
+    if (!isOnline) {
+      try {
+        await queueSubmission({
+          url: 'http://localhost:3001/api/projects',
+          method: 'POST',
+          body: formData,
+          description: `Create project draft: ${formData.title}`,
+        });
+        await removeDraft('create-project-draft');
+        toast.warning(
+          'Offline: Project creation queued in IndexedDB. Will automatically sync when connection returns!',
+          { duration: 6000 }
+        );
+        router.push('/projects');
+      } catch (err: any) {
+        toast.error('Failed to queue offline submission');
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
     try {
       const res = await fetch('http://localhost:3001/api/projects', {
         method: 'POST',
@@ -413,18 +477,16 @@ export function useCreateProjectForm() {
 
       if (!res.ok) {
         if (data.details) {
-          console.error('Backend validation details:', data.details);
-          throw new Error(data.error || 'Backend validation failed');
+            console.error('Backend validation details:', data.details);
+            throw new Error(data.error || 'Backend validation failed');
         }
         throw new Error(data.error || 'Failed to create project');
       }
 
-      toast.success('Project created and escrow initialized successfully!');
-      // Clear draft on successful submission
-      try {
-        localStorage.removeItem(DRAFT_STORAGE_KEY);
-      } catch {}
-
+      await removeDraft('create-project-draft');
+      toast.success('Project created successfully!');
+      
+      // Redirect to milestones creation page
       if (data.project && data.project.id) {
         router.push(`/projects/${data.project.id}/milestones/create`);
       } else {
@@ -485,13 +547,8 @@ export function useCreateProjectForm() {
     handlePathSwapComplete,
     loading,
     errors,
-    currentStep,
-    setCurrentStep,
-    nextStep,
-    prevStep,
-    validateStep,
-    draftSavedAt,
-    clearDraft,
+    isOnline,
+    OfflineStatusPill,
     handleChange,
     toggleYield,
     handleFileUploadMock,

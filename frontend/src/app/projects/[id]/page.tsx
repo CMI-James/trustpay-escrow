@@ -11,10 +11,7 @@ import { ImageLightboxModal } from '@/components/ImageLightboxModal';
 import { DisputeEvidenceAttachments } from '@/components/DisputeEvidenceAttachments';
 import { downloadBlob } from '@/lib/share-card';
 import { ProjectDetailSkeleton } from '@/components/skeletons';
-import { ProjectAuditLog } from '@/components/ProjectAuditLog';
-import { CalendarExportButton } from '@/components/CalendarExportButton';
-import { ContractSecurityModal } from '@/components/ContractSecurityModal';
-import { MutualCancellationModal } from '@/components/MutualCancellationModal';
+import { TimelockCountdownBanner } from '@/components/TimelockCountdownBanner';
 import { useWalletStore } from '@/store/walletStore';
 import { authFetch } from '@/lib/api';
 import { CryptoId } from '@/components/ui/CryptoId';
@@ -1120,16 +1117,21 @@ export default function ProjectDetailsPage() {
             )}
           </div>
 
-          {project.milestones && project.milestones.length > 0 && (
-            <MilestoneGanttChart
-              milestones={project.milestones}
-              projectStart={project.created_at?.slice(0, 10)}
-              projectEnd={project.deadline}
-              tokenSymbol={tokenSymbol}
-              editable={project.status === 'draft'}
-              onReschedule={handleRescheduleMilestone}
-            />
-          )}
+          {/* Active Timelock Countdown Banners for Submitted Milestones */}
+          {project.milestones
+            ?.filter((m) => m.status === 'submitted')
+            .map((submittedM) => (
+              <TimelockCountdownBanner
+                key={`timelock-${submittedM.id}`}
+                milestone={submittedM}
+                project={project}
+                onApprove={(m) => setActiveApproveModal(m)}
+                onRequestRevision={(m) => {
+                  setActiveRevisionModal(m);
+                  setRevisionNote('');
+                }}
+              />
+            ))}
 
           {!project.milestones || project.milestones.length === 0 ? (
             <div className="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-10 text-center flex flex-col items-center justify-center">

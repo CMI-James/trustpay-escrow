@@ -1,190 +1,179 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { toast } from 'sonner';
+import {
+  saveDraft,
+  getDraft,
+  deleteDraft,
+  enqueueSyncRequest,
+  processSyncQueue,
+  getSyncQueue,
+  OfflineDraft,
+} from '@/lib/offline-sync';
 
-/** Represents a queued offline operation (draft save, submission, etc.). */
-export interface OfflineQueueItem {
-  id: string;
-  /** Human-readable description of the operation (e.g. "Save draft: Build Decentralized Escrow UI"). */
-  description: string;
-  /** The HTTP method of the queued request. */
-  method: 'POST' | 'PUT' | 'PATCH' | 'DELETE';
-  /** The API endpoint path (e.g. "/api/projects/123/milestones"). */
-  url: string;
-  /** JSON payload that will be sent when retrying. */
-  payload: unknown;
-  /** ISO timestamp when the item was queued. */
-  queuedAt: string;
-  /** Approximate serialized payload size in bytes. */
-  payloadSize: number;
-  /** Number of retry attempts so far. */
-  retryCount: number;
-  /** Optional tag for filtering/grouping (e.g. "draft", "submission", "approval"). */
-  tag?: string;
+export interface UseOfflineSyncOptions {
+  draftKey?: string;
+  draftType?: 'project' | 'proposal' | 'deliverable' | 'milestones';
+  autoSyncOnOnline?: boolean;
 }
 
-const STORAGE_KEY = 'trustpay-offline-queue';
-const MAX_QUEUE_SIZE = 100;
-const RETRY_DELAY_MS = 2000;
+export function useOfflineSync(options: UseOfflineSyncOptions = {}) {
+  const {
+    draftKey,
+    draftType = 'project',
+    autoSyncOnOnline = true,
+  } = options;
 
-/** Hook for managing the offline queue persisted in localStorage. */
-export function useOfflineSync() {
-  const [queue, setQueue] = useState<OfflineQueueItem[]>([]);
-  const [isOnline, setIsOnline] = useState(true);
-  const [processing, setProcessing] = useState(false);
-  const onlineRef = useRef(true);
+  const [isOnline, setIsOnline] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') return navigator.onLine;
+    return true;
+  });
 
-  // Initialize from localStorage on mount
-  useEffect(() => {
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [queuedCount, setQueuedCount] = useState<number>(0);
+  const isOnlineRef = useRef<boolean>(isOnline);
+
+  const refreshQueueCount = useCallback(async () => {
     try {
-      const stored = window.localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored) as OfflineQueueItem[];
-        if (Array.isArray(parsed)) {
-          setQueue(parsed.slice(-MAX_QUEUE_SIZE));
-        }
-      }
+      const q = await getSyncQueue();
+      setQueuedCount(q.length);
     } catch {
-      // Ignore corrupted storage
+      setQueuedCount(0);
     }
+  }, []);
 
-    // Online/offline detection
+  const triggerSync = useCallback(async () => {
+    if (!navigator.onLine || isSyncing) return;
+    setIsSyncing(true);
+    try {
+      const { synced, failed } = await processSyncQueue();
+      await refreshQueueCount();
+      if (synced > 0) {
+        toast.success(`Successfully synchronized ${synced} offline submission(s) to server!`, {
+          duration: 5000,
+        });
+      }
+    } catch (err: any) {
+      console.warn('Sync error:', err);
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [isSyncing, refreshQueueCount]);
+
+  // Online / offline event listeners
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
     const handleOnline = () => {
       setIsOnline(true);
-      onlineRef.current = true;
-      void flushQueue();
+      isOnlineRef.current = true;
+      if (autoSyncOnOnline) {
+        triggerSync();
+      }
     };
+
     const handleOffline = () => {
       setIsOnline(false);
-      onlineRef.current = false;
+      isOnlineRef.current = false;
+      toast.warning('Network disconnected. Working offline — changes will save locally.', {
+        duration: 4000,
+      });
     };
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
-    // Initial online state
-    setIsOnline(navigator.onLine);
-    onlineRef.current = navigator.onLine;
+    refreshQueueCount();
 
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, []);
+  }, [autoSyncOnOnline, triggerSync, refreshQueueCount]);
 
-  // Persist queue to localStorage whenever it changes
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(queue));
-    } catch {
-      // Storage full or unavailable
-    }
-  }, [queue]);
+  // Helper to save draft
+  const persistDraft = useCallback(
+    async (data: any, keyOverride?: string) => {
+      const targetKey = keyOverride || draftKey;
+      if (!targetKey) return;
+      await saveDraft(targetKey, data, draftType);
+    },
+    [draftKey, draftType]
+  );
 
-  /** Add a new item to the offline queue. */
-  const enqueue = useCallback((
-    description: string,
-    method: OfflineQueueItem['method'],
-    url: string,
-    payload: unknown,
-    tag?: string
-  ) => {
-    const item: OfflineQueueItem = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
-      description,
-      method,
-      url,
-      payload,
-      queuedAt: new Date().toISOString(),
-      payloadSize: new TextEncoder().encode(JSON.stringify(payload)).length,
-      retryCount: 0,
-      tag,
-    };
-    setQueue((prev) => [...prev.slice(-(MAX_QUEUE_SIZE - 1)), item]);
-    return item.id;
-  }, []);
+  // Helper to restore draft
+  const loadDraft = useCallback(
+    async <T>(keyOverride?: string): Promise<T | null> => {
+      const targetKey = keyOverride || draftKey;
+      if (!targetKey) return null;
+      const res = await getDraft<T>(targetKey);
+      return res ? res.data : null;
+    },
+    [draftKey]
+  );
 
-  /** Remove a specific item from the queue. */
-  const discard = useCallback((id: string) => {
-    setQueue((prev) => prev.filter((item) => item.id !== id));
-  }, []);
+  // Helper to clear draft
+  const removeDraft = useCallback(
+    async (keyOverride?: string) => {
+      const targetKey = keyOverride || draftKey;
+      if (!targetKey) return;
+      await deleteDraft(targetKey);
+    },
+    [draftKey]
+  );
 
-  /** Clear the entire queue. */
-  const clear = useCallback(() => {
-    setQueue([]);
-  }, []);
-
-  /** Retry a specific item immediately. */
-  const retry = useCallback(async (id: string): Promise<boolean> => {
-    const item = queue.find((i) => i.id === id);
-    if (!item) return false;
-
-    setProcessing(true);
-    try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
-      const res = await fetch(`${apiUrl}${item.url}`, {
-        method: item.method,
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(item.payload),
-      });
-
-      if (res.ok) {
-        discard(id);
-        return true;
-      } else {
-        // Increment retry count on failure
-        setQueue((prev) =>
-          prev.map((i) =>
-            i.id === id ? { ...i, retryCount: i.retryCount + 1 } : i
-          )
-        );
-        return false;
-      }
-    } catch {
-      setQueue((prev) =>
-        prev.map((i) =>
-          i.id === id ? { ...i, retryCount: i.retryCount + 1 } : i
-        )
-      );
-      return false;
-    } finally {
-      setProcessing(false);
-    }
-  }, [queue, discard]);
-
-  /** Flush all pending items when coming back online. */
-  const flushQueue = useCallback(async () => {
-    if (!onlineRef.current || processing) return;
-
-    const items = queue.filter((i) => i.retryCount < 5); // Max 5 retries
-    for (const item of items) {
-      if (!onlineRef.current) break;
-      await retry(item.id);
-      // Small delay between retries to avoid overwhelming the server
-      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
-    }
-  }, [queue, retry]);
-
-  // Auto-flush when coming online
-  useEffect(() => {
-    if (isOnline && queue.length > 0) {
-      void flushQueue();
-    }
-  }, [isOnline, queue.length, flushQueue]);
+  // Helper to queue submission when offline
+  const queueSubmission = useCallback(
+    async (params: {
+      url: string;
+      method?: 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+      headers?: Record<string, string>;
+      body?: any;
+      description?: string;
+    }) => {
+      const id = await enqueueSyncRequest(params);
+      await refreshQueueCount();
+      return id;
+    },
+    [refreshQueueCount]
+  );
 
   return {
-    queue,
     isOnline,
-    processing,
-    enqueue,
-    discard,
-    clear,
-    retry,
-    flushQueue,
-    pendingCount: queue.length,
+    isSyncing,
+    queuedCount,
+    persistDraft,
+    loadDraft,
+    removeDraft,
+    queueSubmission,
+    triggerSync,
+    refreshQueueCount,
   };
+}
+
+/**
+ * Amber status pill displayed when network disconnects
+ */
+export function OfflineStatusPill({ className = '' }: { className?: string }) {
+  const { isOnline, queuedCount } = useOfflineSync();
+
+  if (isOnline) return null;
+
+  return (
+    <div
+      role="status"
+      className={`inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/15 border border-amber-500/40 text-amber-300 text-xs font-semibold shadow-md animate-pulse ${className}`}
+    >
+      <span className="w-2 h-2 rounded-full bg-amber-400" />
+      <span>Offline — Changes Saved Locally</span>
+      {queuedCount > 0 && (
+        <span className="px-1.5 py-0.2 rounded-full bg-amber-500/30 text-amber-200 text-[10px] font-bold">
+          {queuedCount} queued
+        </span>
+      )}
+    </div>
+  );
 }
 
 export default useOfflineSync;
